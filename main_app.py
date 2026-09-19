@@ -1,16 +1,16 @@
 """
 Data Quality & Analytics Platform - Combined App
 ------------------------------------------------------------------
-This single file combines two features into one app with a sidebar
-to switch between them:
+Three features, switchable from a styled sidebar:
 
-  1. Data Upload      - upload CSV/Excel/PDF/TXT/images, see an overview
-  2. Image Sorting    - upload multiple images, auto-sort by category
+  1. Data Upload      - upload one or more CSV/Excel/PDF/TXT/images
+  2. Data Quality Report - full quality report for EVERY uploaded file
+  3. Image Sorting    - upload multiple images, auto-sort by category
 
 Run this with: streamlit run main_app.py
 
 Required packages:
-  pip install streamlit pandas openpyxl Pillow pypdf tensorflow
+  pip install streamlit pandas openpyxl Pillow pypdf tensorflow numpy
 """
 
 import streamlit as st
@@ -25,14 +25,154 @@ from collections import defaultdict
 # ==================================================================
 # PAGE SETUP
 # ==================================================================
-st.set_page_config(page_title="Data Quality & Analytics Platform", layout="wide")
-
-# st.sidebar puts this selection box on the left-hand side, so the
-# user can switch between features without leaving the app.
-page = st.sidebar.radio(
-    "Choose a feature:",
-    ["Data Upload", "Data Quality Report", "Image Sorting by Category"]
+st.set_page_config(
+    page_title="Clarifile - Upload, Check, Understand Any File",
+    page_icon="📊",
+    layout="wide",
 )
+
+# ------------------------------------------------------------------
+# LANDING PAGE
+# Shown once per session, before the actual app. A pure black
+# background with a centered title and one clear entry button.
+# "entered_app" in session_state gates everything below it - the
+# rest of the file (sidebar, features) only renders after the
+# button is clicked.
+# ------------------------------------------------------------------
+if "entered_app" not in st.session_state:
+    st.session_state["entered_app"] = False
+
+if not st.session_state["entered_app"]:
+    # Force a black page background (Streamlit's default theme
+    # background is overridden here specifically for the landing
+    # page) and hide the sidebar entirely while on this screen.
+    st.markdown(
+        """
+        <style>
+        [data-testid="stAppViewContainer"], [data-testid="stHeader"], body {
+            background-color: #000000 !important;
+        }
+        section[data-testid="stSidebar"] {
+            display: none;
+        }
+        .landing-title {
+            text-align: center;
+            font-size: 3.2rem;
+            font-weight: 800;
+            color: #FFFFFF;
+            margin-top: 14vh;
+            margin-bottom: 0.5rem;
+            letter-spacing: -0.02em;
+        }
+        .landing-subtitle {
+            text-align: center;
+            font-size: 1.15rem;
+            color: #9CA3AF;
+            margin-bottom: 3rem;
+        }
+        div[data-testid="stButton"] {
+            display: flex;
+            justify-content: center;
+        }
+        div[data-testid="stButton"] button {
+            background: linear-gradient(135deg, #2DD4BF, #818CF8);
+            color: #000000;
+            font-weight: 700;
+            font-size: 1.1rem;
+            padding: 0.9rem 2.8rem;
+            border-radius: 999px;
+            border: none;
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+        }
+        div[data-testid="stButton"] button:hover {
+            transform: scale(1.04);
+            box-shadow: 0 0 24px rgba(45, 212, 191, 0.45);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="landing-title">Welcome to Clarifile</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="landing-subtitle">Upload any file. Get clarity on what\'s inside.</div>',
+        unsafe_allow_html=True,
+    )
+
+    _, center_col, _ = st.columns([1, 1, 1])
+    with center_col:
+        if st.button("Enter Platform →", key="enter_platform_button", use_container_width=True):
+            st.session_state["entered_app"] = True
+            st.rerun()
+
+    # Stops execution here - nothing below runs until the button
+    # above is clicked and the page reruns.
+    st.stop()
+
+
+# Each feature gets its own accent color, used consistently in the
+# sidebar nav button, the page's icon, and its section headers -
+# this is what makes the three features feel visually distinct
+# rather than uniform.
+FEATURE_ACCENTS = {
+    "Data Upload": {"color": "#2DD4BF", "icon": "📤"},
+    "Data Quality Report": {"color": "#F5A524", "icon": "🩺"},
+    "Image Sorting by Category": {"color": "#818CF8", "icon": "🖼️"},
+}
+
+# ------------------------------------------------------------------
+# Sidebar navigation styling
+# Streamlit doesn't let us fully restyle st.radio, so instead we use
+# real st.button widgets (one per feature) and track which one is
+# "active" in session_state. Custom CSS below gives each button an
+# icon-friendly layout, a colored left border on the active one, and
+# a muted look on the inactive ones.
+# ------------------------------------------------------------------
+st.markdown(
+    """
+    <style>
+    section[data-testid="stSidebar"] button {
+        width: 100%;
+        text-align: left;
+        border-radius: 8px;
+        border: 1px solid rgba(255,255,255,0.08);
+        padding: 0.65rem 0.9rem;
+        margin-bottom: 0.4rem;
+        font-size: 0.95rem;
+        transition: all 0.15s ease;
+    }
+    section[data-testid="stSidebar"] button:hover {
+        border-color: rgba(255,255,255,0.25);
+        transform: translateX(2px);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+if "current_page" not in st.session_state:
+    st.session_state["current_page"] = "Data Upload"
+
+st.sidebar.markdown("### Choose a feature")
+
+for feature_name, style in FEATURE_ACCENTS.items():
+    is_active = st.session_state["current_page"] == feature_name
+    button_label = f"{style['icon']}  {feature_name}"
+
+    # The active button gets a colored border via type="primary"
+    # (Streamlit tints primary buttons with the theme accent); the
+    # rest stay as plain secondary buttons.
+    if st.sidebar.button(
+        button_label,
+        key=f"nav_{feature_name}",
+        type="primary" if is_active else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state["current_page"] = feature_name
+        st.rerun()
+
+page = st.session_state["current_page"]
+accent = FEATURE_ACCENTS[page]["color"]
 
 
 # ==================================================================
@@ -201,87 +341,122 @@ def display_basic_summary(df):
         st.info("No missing values were detected in this dataset.")
 
 
-def run_data_upload_page():
-    st.title("Data Quality & Analytics Platform")
-    st.caption("Part 1: Data Upload")
-    st.header("Upload Your Dataset")
-
-    uploaded_file = st.file_uploader("Choose a file", type=SUPPORTED_EXTENSIONS)
-    st.caption("Supported formats: CSV, XLSX, XLS, PDF, TXT, JPG, JPEG")
-
-    if uploaded_file is None:
-        st.info("👆 Upload a file to get started.")
-        return
-
+def process_one_upload(uploaded_file):
+    """
+    Runs one uploaded file through validation and loading. Returns
+    a dict describing the outcome, so the caller can display it (or
+    an error) without needing to know the loading details.
+    """
     filename = uploaded_file.name
 
     is_valid, extension, error_message = validate_file(uploaded_file)
     if not is_valid:
-        st.error(error_message)
-        return
+        return {"filename": filename, "error": error_message}
 
     try:
         df, image = load_dataset(uploaded_file, extension)
     except (pd.errors.EmptyDataError, ValueError):
-        st.error(
-            "The file was read, but it doesn't appear to contain any "
-            "usable data. Please check the file and try again."
-        )
-        return
+        return {
+            "filename": filename,
+            "error": (
+                "The file was read, but it doesn't appear to contain any "
+                "usable data. Please check the file and try again."
+            ),
+        }
     except (pd.errors.ParserError, UnicodeDecodeError):
-        st.error(
-            "This file appears to be corrupted or not formatted correctly "
-            f"for a .{extension} file. Please verify the file and try "
-            "uploading it again."
-        )
-        return
+        return {
+            "filename": filename,
+            "error": (
+                "This file appears to be corrupted or not formatted "
+                f"correctly for a .{extension} file."
+            ),
+        }
     except Exception:
-        st.error(
-            "Something went wrong while reading this file. It may be "
-            "corrupted or in an unexpected format. Please try a "
-            "different file."
-        )
-        return
+        return {
+            "filename": filename,
+            "error": (
+                "Something went wrong while reading this file. It may be "
+                "corrupted or in an unexpected format."
+            ),
+        }
 
     if df.shape[1] == 0:
-        st.error("This file doesn't contain any columns that could be read.")
-        return
+        return {"filename": filename, "error": "This file doesn't contain any columns that could be read."}
 
     if df.shape[0] == 0:
-        st.warning("This dataset has no rows - only column headers were found.")
+        return {"filename": filename, "error": "This dataset has no rows - only column headers were found."}
+
+    return {"filename": filename, "df": df, "image": image, "error": None}
+
+
+def run_data_upload_page():
+    st.markdown(
+        f"<h1 style='color:{accent}'>{FEATURE_ACCENTS[page]['icon']} Data Upload</h1>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Upload one or more files. Each one gets its own overview below, "
+        "and all of them become available on the Data Quality Report page."
+    )
+
+    # accept_multiple_files=True lets someone upload several datasets
+    # at once (e.g., a whole batch of CSVs), instead of one at a time.
+    uploaded_files = st.file_uploader(
+        "Choose one or more files",
+        type=SUPPORTED_EXTENSIONS,
+        accept_multiple_files=True,
+    )
+    st.caption("Supported formats: CSV, XLSX, XLS, PDF, TXT, JPG, JPEG")
+
+    if not uploaded_files:
+        st.info("👆 Upload one or more files to get started.")
         return
 
-    st.success(f"'{filename}' was uploaded and read successfully.")
+    # This dict holds EVERY successfully loaded dataset, keyed by
+    # filename, so the Data Quality Report page can show a full
+    # report for each one - not just the most recently uploaded file.
+    if "uploaded_datasets" not in st.session_state:
+        st.session_state["uploaded_datasets"] = {}
 
-    # Save the dataset in session_state so the Data Quality Report page
-    # can use it without asking the user to upload it a second time.
-    st.session_state["uploaded_df"] = df
-    st.session_state["uploaded_filename"] = filename
+    for uploaded_file in uploaded_files:
+        result = process_one_upload(uploaded_file)
+        filename = result["filename"]
 
-    display_dataset_information(df, filename)
+        with st.container(border=True):
+            if result["error"]:
+                st.error(f"**{filename}**: {result['error']}")
+                continue
 
-    if image is not None:
-        display_image_preview(image)
+            df = result["df"]
+            image = result["image"]
 
-    display_dataset_preview(df)
-    display_column_information(df)
-    display_basic_summary(df)
+            st.success(f"'{filename}' was uploaded and read successfully.")
+
+            # Keep this dataset available for the Data Quality Report page.
+            st.session_state["uploaded_datasets"][filename] = df
+
+            display_dataset_information(df, filename)
+
+            if image is not None:
+                display_image_preview(image)
+
+            with st.expander("View dataset details", expanded=(len(uploaded_files) == 1)):
+                display_dataset_preview(df)
+                display_column_information(df)
+                display_basic_summary(df)
 
 
 # ==================================================================
 # FEATURE 2: DATA QUALITY REPORT
 # ==================================================================
 #
-# This feature checks an uploaded dataset for common data quality
-# problems and produces an overall quality score (0-100). It reuses
-# whatever dataset was uploaded on the Data Upload page (stored in
-# st.session_state), so the user doesn't need to upload it twice.
+# Checks every uploaded dataset for common data quality problems and
+# produces an overall quality score (0-100) for EACH one. Reuses
+# whatever was uploaded on the Data Upload page (stored in
+# st.session_state["uploaded_datasets"]).
 
 def check_missing_values(df):
-    """
-    Returns a per-column breakdown of missing values, plus the total
-    count and percentage across the whole dataset.
-    """
+    """Per-column breakdown of missing values, plus totals."""
     missing_per_column = df.isna().sum()
     total_cells = df.shape[0] * df.shape[1]
     total_missing = int(missing_per_column.sum())
@@ -292,7 +467,6 @@ def check_missing_values(df):
         "Missing Count": missing_per_column.values,
         "Missing %": (missing_per_column.values / len(df) * 100).round(2),
     })
-    # Only show columns that actually have missing values, sorted worst-first.
     breakdown = breakdown[breakdown["Missing Count"] > 0].sort_values(
         "Missing Count", ascending=False
     )
@@ -301,10 +475,7 @@ def check_missing_values(df):
 
 
 def check_duplicate_rows(df):
-    """
-    Returns the number of fully duplicated rows and their percentage
-    of the dataset, plus a preview of the duplicate rows themselves.
-    """
+    """Fully duplicated rows: count, percentage, and a preview."""
     duplicate_mask = df.duplicated(keep=False)
     duplicate_count = int(df.duplicated(keep="first").sum())
     percent_duplicate = (duplicate_count / len(df) * 100) if len(df) > 0 else 0
@@ -315,29 +486,21 @@ def check_duplicate_rows(df):
 
 def check_inconsistent_types(df):
     """
-    Flags "object" (text) columns that actually contain a mix of
-    types under the hood - e.g., a column that's mostly numbers but
-    has a few text entries like "N/A" or "unknown" mixed in. This is
-    a common real-world data quality issue that a plain dtype check
-    misses, since pandas just labels the whole column as "object."
+    Flags "object" (text) columns that contain a mix of types under
+    the hood - e.g., a column that's mostly numbers but has a few
+    text entries like "N/A" mixed in.
     """
     inconsistent_columns = []
 
     for column in df.columns:
-        # Only check "object" columns - numeric/datetime columns are
-        # already internally consistent by definition.
         if df[column].dtype == "object":
             non_null_values = df[column].dropna()
             if len(non_null_values) == 0:
                 continue
 
-            # Try to see how many values in this "text" column could
-            # actually be parsed as numbers.
             numeric_convertible = pd.to_numeric(non_null_values, errors="coerce").notna()
             percent_numeric = numeric_convertible.mean() * 100
 
-            # If SOME but not ALL values are numeric, that's a mixed-type
-            # column - e.g., a "quantity" column with "5", "10", "unknown".
             if 0 < percent_numeric < 100:
                 inconsistent_columns.append({
                     "Column": column,
@@ -349,10 +512,8 @@ def check_inconsistent_types(df):
 
 def check_outliers(df):
     """
-    Uses the IQR (Interquartile Range) method - a standard statistical
-    approach - to flag unusually extreme values in each numeric column.
-    Any value more than 1.5x the IQR beyond the 25th/75th percentile is
-    flagged as a potential outlier.
+    Uses the IQR (Interquartile Range) method to flag unusually
+    extreme values in each numeric column.
     """
     outlier_summary = []
     numeric_columns = df.select_dtypes(include=[np.number]).columns
@@ -360,7 +521,6 @@ def check_outliers(df):
     for column in numeric_columns:
         values = df[column].dropna()
         if len(values) < 4:
-            # Not enough data points to meaningfully calculate quartiles.
             continue
 
         q1 = values.quantile(0.25)
@@ -382,156 +542,270 @@ def check_outliers(df):
     return pd.DataFrame(outlier_summary)
 
 
-def calculate_quality_score(df, total_missing, percent_missing, duplicate_count,
-                             percent_duplicate, inconsistent_df, outlier_df):
+# Column names that strongly suggest the values should never be
+# negative. This is a heuristic (based on common naming patterns),
+# not a guarantee - it's meant to catch likely data-entry errors.
+NON_NEGATIVE_NAME_HINTS = [
+    "age", "price", "cost", "amount", "quantity", "qty", "count",
+    "total", "weight", "height", "length", "distance", "salary",
+    "income", "duration", "score", "rating", "fare",
+]
+
+
+def check_invalid_values(df):
     """
-    Combines every check above into a single 0-100 quality score.
-    Starts at 100 and subtracts penalty points for each issue found,
-    weighted by how severe/widespread that issue is. This is a
-    reasonable, transparent scoring approach - not the only valid one,
-    but it's easy to explain and adjust later.
+    Flags likely-invalid values based on common-sense rules:
+      - Negative numbers in columns whose name suggests they should
+        never be negative (e.g., "age", "price", "quantity").
+      - Values of exactly 0 in columns like "age" that are almost
+        certainly placeholders for missing data, not real zeros.
+    This is heuristic, not exhaustive - it's meant to catch obvious,
+    common data-entry mistakes.
+    """
+    invalid_summary = []
+    numeric_columns = df.select_dtypes(include=[np.number]).columns
+
+    for column in numeric_columns:
+        column_lower = column.lower()
+        matches_hint = any(hint in column_lower for hint in NON_NEGATIVE_NAME_HINTS)
+
+        if not matches_hint:
+            continue
+
+        values = df[column].dropna()
+        if len(values) == 0:
+            continue
+
+        negative_count = int((values < 0).sum())
+        if negative_count > 0:
+            invalid_summary.append({
+                "Column": column,
+                "Issue": "Negative values found",
+                "Count": negative_count,
+                "Example": values[values < 0].iloc[0],
+            })
+
+    return pd.DataFrame(invalid_summary)
+
+
+def check_formatting_issues(df):
+    """
+    Flags text columns with formatting inconsistencies that are easy
+    to miss visually but cause real problems - e.g., "USA" and " USA "
+    or "usa" being treated as different categories.
+    """
+    formatting_issues = []
+    text_columns = df.select_dtypes(include=["object"]).columns
+
+    for column in text_columns:
+        values = df[column].dropna().astype(str)
+        if len(values) == 0:
+            continue
+
+        has_leading_trailing_space = (values != values.str.strip()).sum()
+        # Compare how many unique values exist normally vs. after
+        # lowercasing + stripping whitespace - a big drop means many
+        # "different" values are actually the same thing, just
+        # formatted inconsistently (e.g., "USA" vs "usa" vs " USA").
+        unique_raw = values.nunique()
+        unique_normalized = values.str.strip().str.lower().nunique()
+        collapsed_count = unique_raw - unique_normalized
+
+        if has_leading_trailing_space > 0 or collapsed_count > 0:
+            formatting_issues.append({
+                "Column": column,
+                "Extra Whitespace": int(has_leading_trailing_space),
+                "Inconsistent Capitalization/Spacing": int(collapsed_count),
+            })
+
+    return pd.DataFrame(formatting_issues)
+
+
+def check_constant_columns(df):
+    """
+    Flags columns where every non-missing value is identical (zero
+    variance). These columns carry no information and are usually
+    either a data export mistake or a leftover placeholder column.
+    """
+    constant_columns = []
+
+    for column in df.columns:
+        non_null_values = df[column].dropna()
+        if len(non_null_values) == 0:
+            continue
+        if non_null_values.nunique() == 1:
+            constant_columns.append({
+                "Column": column,
+                "Constant Value": non_null_values.iloc[0],
+            })
+
+    return pd.DataFrame(constant_columns)
+
+
+def check_high_cardinality(df):
+    """
+    Flags text columns where almost every value is unique (>95%).
+    This usually means the column is actually an ID or free-text
+    field, not a category - useful to know since it changes how the
+    column should be analyzed later (e.g., it shouldn't be charted
+    as a category).
+    """
+    high_cardinality_columns = []
+
+    for column in df.select_dtypes(include=["object"]).columns:
+        non_null_values = df[column].dropna()
+        if len(non_null_values) < 10:
+            continue
+
+        percent_unique = non_null_values.nunique() / len(non_null_values) * 100
+        if percent_unique > 95:
+            high_cardinality_columns.append({
+                "Column": column,
+                "Unique %": round(percent_unique, 1),
+                "Likely Type": "ID or free text (not a category)",
+            })
+
+    return pd.DataFrame(high_cardinality_columns)
+
+
+def calculate_quality_score(percent_missing, percent_duplicate, inconsistent_df,
+                             outlier_df, invalid_df, formatting_df, constant_df):
+    """
+    Combines every check into a single 0-100 quality score. Starts
+    at 100 and subtracts penalty points for each issue found,
+    weighted by severity and capped so no single issue can dominate
+    the score by itself.
     """
     score = 100.0
 
-    # Missing values: penalize proportionally, capped so a single
-    # issue can't zero out the whole score by itself.
-    score -= min(percent_missing * 0.5, 30)
-
-    # Duplicate rows: similarly capped.
-    score -= min(percent_duplicate * 0.5, 20)
-
-    # Inconsistent types: fixed penalty per affected column.
-    score -= min(len(inconsistent_df) * 5, 20)
-
-    # Outliers: small penalty per affected column, since some
-    # outliers are expected/legitimate in real data.
-    score -= min(len(outlier_df) * 3, 15)
+    score -= min(percent_missing * 0.5, 25)
+    score -= min(percent_duplicate * 0.5, 15)
+    score -= min(len(inconsistent_df) * 4, 15)
+    score -= min(len(outlier_df) * 2, 10)
+    score -= min(len(invalid_df) * 5, 15)
+    score -= min(len(formatting_df) * 3, 10)
+    score -= min(len(constant_df) * 3, 10)
 
     return max(round(score), 0)
 
 
-def display_quality_score(score):
-    """Shows the overall score with a color-coded label."""
+def display_quality_score(score, accent_color):
     if score >= 90:
-        label, color = "Excellent", "green"
+        label, color = "Excellent", "#22C55E"
     elif score >= 75:
-        label, color = "Good", "blue"
+        label, color = "Good", "#3B82F6"
     elif score >= 50:
-        label, color = "Needs Attention", "orange"
+        label, color = "Needs Attention", "#F59E0B"
     else:
-        label, color = "Poor", "red"
+        label, color = "Poor", "#EF4444"
 
-    st.markdown(f"## Overall Data Quality Score: {score}/100")
-    st.markdown(f":{color}[**{label}**]")
+    st.markdown(
+        f"""
+        <div style="display:flex; align-items:baseline; gap:0.75rem; margin-bottom:0.25rem;">
+            <span style="font-size:2rem; font-weight:700;">{score}/100</span>
+            <span style="font-size:1.1rem; font-weight:600; color:{color};">{label}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     st.progress(score / 100)
 
 
-def run_data_quality_report_page():
-    st.title("Data Quality Report")
-    st.caption("Part 2: Automated data quality checks")
-
-    # Reuse the dataset uploaded on the Data Upload page, if any.
-    df = st.session_state.get("uploaded_df")
-    filename = st.session_state.get("uploaded_filename", "your dataset")
-
-    if df is None:
-        st.warning(
-            "No dataset found. Please upload a file on the **Data Upload** "
-            "page first, then come back here."
-        )
-        return
-
-    st.info(f"Analyzing: **{filename}** ({df.shape[0]:,} rows, {df.shape[1]:,} columns)")
-
-    # Run every check.
+def render_quality_report_for_one_dataset(filename, df, accent_color):
+    """Runs every check on one dataset and renders its full report."""
     missing_breakdown, total_missing, percent_missing = check_missing_values(df)
     duplicate_count, percent_duplicate, duplicate_preview = check_duplicate_rows(df)
     inconsistent_df = check_inconsistent_types(df)
     outlier_df = check_outliers(df)
+    invalid_df = check_invalid_values(df)
+    formatting_df = check_formatting_issues(df)
+    constant_df = check_constant_columns(df)
+    high_cardinality_df = check_high_cardinality(df)
 
-    # Combine into one overall score.
     score = calculate_quality_score(
-        df, total_missing, percent_missing, duplicate_count,
-        percent_duplicate, inconsistent_df, outlier_df
+        percent_missing, percent_duplicate, inconsistent_df,
+        outlier_df, invalid_df, formatting_df, constant_df
     )
 
-    display_quality_score(score)
+    display_quality_score(score, accent_color)
+    st.caption(f"{df.shape[0]:,} rows x {df.shape[1]:,} columns")
 
     st.divider()
 
-    # ------------------------------------------------------------------
-    # Missing values section
-    # ------------------------------------------------------------------
-    st.subheader("🔍 Missing Values")
-    if total_missing > 0:
-        st.write(
-            f"Found **{total_missing:,}** missing value(s) "
-            f"({percent_missing:.1f}% of all cells)."
+    checks = [
+        ("🔍 Missing Values", total_missing > 0,
+         f"Found **{total_missing:,}** missing value(s) ({percent_missing:.1f}% of all cells).",
+         missing_breakdown),
+        ("🔁 Duplicate Rows", duplicate_count > 0,
+         f"Found **{duplicate_count:,}** duplicate row(s) ({percent_duplicate:.1f}% of the dataset).",
+         duplicate_preview),
+        ("⚠️ Inconsistent Data Types", not inconsistent_df.empty,
+         f"Found **{len(inconsistent_df)}** column(s) with mixed data types.",
+         inconsistent_df),
+        ("📈 Outliers", not outlier_df.empty,
+         f"Found potential outliers in **{len(outlier_df)}** numeric column(s) (IQR method).",
+         outlier_df),
+        ("🚫 Invalid Values", not invalid_df.empty,
+         f"Found **{len(invalid_df)}** column(s) with values that look invalid (e.g., negative ages).",
+         invalid_df),
+        ("✂️ Formatting Issues", not formatting_df.empty,
+         f"Found **{len(formatting_df)}** text column(s) with inconsistent spacing/capitalization.",
+         formatting_df),
+        ("🟰 Constant Columns", not constant_df.empty,
+         f"Found **{len(constant_df)}** column(s) where every value is identical.",
+         constant_df),
+        ("🆔 High-Cardinality Columns", not high_cardinality_df.empty,
+         f"Found **{len(high_cardinality_df)}** column(s) that look like IDs or free text, not categories.",
+         high_cardinality_df),
+    ]
+
+    for title, has_issue, message, detail_df in checks:
+        st.subheader(title)
+        if has_issue:
+            st.write(message)
+            st.dataframe(detail_df, use_container_width=True, hide_index=True)
+        else:
+            st.success("No issues detected.")
+        st.divider()
+
+
+def run_data_quality_report_page():
+    st.markdown(
+        f"<h1 style='color:{accent}'>{FEATURE_ACCENTS[page]['icon']} Data Quality Report</h1>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "A full quality report for every file you've uploaded - not just "
+        "the most recent one."
+    )
+
+    datasets = st.session_state.get("uploaded_datasets", {})
+
+    if not datasets:
+        st.warning(
+            "No datasets found. Please upload one or more files on the "
+            "**Data Upload** page first, then come back here."
         )
-        st.dataframe(missing_breakdown, use_container_width=True, hide_index=True)
-    else:
-        st.success("No missing values detected.")
+        return
 
-    st.divider()
+    st.info(f"Analyzing **{len(datasets)}** dataset(s).")
 
-    # ------------------------------------------------------------------
-    # Duplicate rows section
-    # ------------------------------------------------------------------
-    st.subheader("🔁 Duplicate Rows")
-    if duplicate_count > 0:
-        st.write(
-            f"Found **{duplicate_count:,}** duplicate row(s) "
-            f"({percent_duplicate:.1f}% of the dataset)."
-        )
-        st.caption("Preview of duplicated rows (showing up to 20):")
-        st.dataframe(duplicate_preview, use_container_width=True)
-    else:
-        st.success("No duplicate rows detected.")
-
-    st.divider()
-
-    # ------------------------------------------------------------------
-    # Inconsistent data types section
-    # ------------------------------------------------------------------
-    st.subheader("⚠️ Inconsistent Data Types")
-    if not inconsistent_df.empty:
-        st.write(
-            f"Found **{len(inconsistent_df)}** column(s) with mixed "
-            "data types (e.g., numbers and text mixed together)."
-        )
-        st.dataframe(inconsistent_df, use_container_width=True, hide_index=True)
-    else:
-        st.success("No inconsistent data types detected.")
-
-    st.divider()
-
-    # ------------------------------------------------------------------
-    # Outliers section
-    # ------------------------------------------------------------------
-    st.subheader("📈 Outliers")
-    if not outlier_df.empty:
-        st.write(
-            f"Found potential outliers in **{len(outlier_df)}** numeric "
-            "column(s), based on the IQR method (values far outside the "
-            "typical range for that column)."
-        )
-        st.dataframe(outlier_df, use_container_width=True, hide_index=True)
-    else:
-        st.success("No significant outliers detected in numeric columns.")
+    # Each uploaded file gets its own titled, collapsible section, so
+    # uploading several files shows several full reports at once,
+    # rather than only ever showing the most recent one.
+    for filename, df in datasets.items():
+        with st.expander(f"📄 {filename}", expanded=(len(datasets) == 1)):
+            render_quality_report_for_one_dataset(filename, df, accent)
 
 
 # ==================================================================
-# FEATURE 2: IMAGE SORTING BY CATEGORY
+# FEATURE 3: IMAGE SORTING BY CATEGORY
 # ==================================================================
 
 @st.cache_resource
 def load_classification_model():
     """
-    Loads the pretrained MobileNetV2 model once and caches it, so it
-    doesn't reload every time a new image is uploaded. Imported
-    inside the function so this heavy library only loads when the
-    Image Sorting page is actually used.
-
+    Loads the pretrained MobileNetV2 model once and caches it.
     Returns None if TensorFlow fails to load (e.g., a Windows DLL
     error), so the rest of the app can keep working instead of
     crashing entirely.
@@ -564,7 +838,10 @@ def classify_image(model, image: Image.Image) -> str:
 
 
 def run_image_sorting_page():
-    st.title("🖼️ Image Sorting by Category")
+    st.markdown(
+        f"<h1 style='color:{accent}'>{FEATURE_ACCENTS[page]['icon']} Image Sorting by Category</h1>",
+        unsafe_allow_html=True,
+    )
     st.caption("Upload multiple images and they'll be automatically grouped by what they show.")
 
     uploaded_files = st.file_uploader(
@@ -613,7 +890,6 @@ def run_image_sorting_page():
 
 # ==================================================================
 # MAIN ROUTER
-# Runs whichever page the user picked from the sidebar above.
 # ==================================================================
 if page == "Data Upload":
     run_data_upload_page()
