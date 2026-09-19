@@ -31,7 +31,7 @@ st.set_page_config(page_title="Data Quality & Analytics Platform", layout="wide"
 # user can switch between features without leaving the app.
 page = st.sidebar.radio(
     "Choose a feature:",
-    ["Data Upload", "Image Sorting by Category"]
+    ["Data Upload", "Data Quality Report", "Image Sorting by Category"]
 )
 
 
@@ -253,6 +253,11 @@ def run_data_upload_page():
 
     st.success(f"'{filename}' was uploaded and read successfully.")
 
+    # Save the dataset in session_state so the Data Quality Report page
+    # can use it without asking the user to upload it a second time.
+    st.session_state["uploaded_df"] = df
+    st.session_state["uploaded_filename"] = filename
+
     display_dataset_information(df, filename)
 
     if image is not None:
@@ -261,6 +266,258 @@ def run_data_upload_page():
     display_dataset_preview(df)
     display_column_information(df)
     display_basic_summary(df)
+
+
+# ==================================================================
+# FEATURE 2: DATA QUALITY REPORT
+# ==================================================================
+#
+# This feature checks an uploaded dataset for common data quality
+# problems and produces an overall quality score (0-100). It reuses
+# whatever dataset was uploaded on the Data Upload page (stored in
+# st.session_state), so the user doesn't need to upload it twice.
+
+def check_missing_values(df):
+    """
+    Returns a per-column breakdown of missing values, plus the total
+    count and percentage across the whole dataset.
+    """
+    missing_per_column = df.isna().sum()
+    total_cells = df.shape[0] * df.shape[1]
+    total_missing = int(missing_per_column.sum())
+    percent_missing = (total_missing / total_cells * 100) if total_cells > 0 else 0
+
+    breakdown = pd.DataFrame({
+        "Column": df.columns,
+        "Missing Count": missing_per_column.values,
+        "Missing %": (missing_per_column.values / len(df) * 100).round(2),
+    })
+    # Only show columns that actually have missing values, sorted worst-first.
+    breakdown = breakdown[breakdown["Missing Count"] > 0].sort_values(
+        "Missing Count", ascending=False
+    )
+
+    return breakdown, total_missing, percent_missing
+
+
+def check_duplicate_rows(df):
+    """
+    Returns the number of fully duplicated rows and their percentage
+    of the dataset, plus a preview of the duplicate rows themselves.
+    """
+    duplicate_mask = df.duplicated(keep=False)
+    duplicate_count = int(df.duplicated(keep="first").sum())
+    percent_duplicate = (duplicate_count / len(df) * 100) if len(df) > 0 else 0
+    duplicate_rows_preview = df[duplicate_mask].head(20)
+
+    return duplicate_count, percent_duplicate, duplicate_rows_preview
+
+
+def check_inconsistent_types(df):
+    """
+    Flags "object" (text) columns that actually contain a mix of
+    types under the hood - e.g., a column that's mostly numbers but
+    has a few text entries like "N/A" or "unknown" mixed in. This is
+    a common real-world data quality issue that a plain dtype check
+    misses, since pandas just labels the whole column as "object."
+    """
+    inconsistent_columns = []
+
+    for column in df.columns:
+        # Only check "object" columns - numeric/datetime columns are
+        # already internally consistent by definition.
+        if df[column].dtype == "object":
+            non_null_values = df[column].dropna()
+            if len(non_null_values) == 0:
+                continue
+
+            # Try to see how many values in this "text" column could
+            # actually be parsed as numbers.
+            numeric_convertible = pd.to_numeric(non_null_values, errors="coerce").notna()
+            percent_numeric = numeric_convertible.mean() * 100
+
+            # If SOME but not ALL values are numeric, that's a mixed-type
+            # column - e.g., a "quantity" column with "5", "10", "unknown".
+            if 0 < percent_numeric < 100:
+                inconsistent_columns.append({
+                    "Column": column,
+                    "Issue": f"Mix of numeric and text values ({percent_numeric:.0f}% look numeric)",
+                })
+
+    return pd.DataFrame(inconsistent_columns)
+
+
+def check_outliers(df):
+    """
+    Uses the IQR (Interquartile Range) method - a standard statistical
+    approach - to flag unusually extreme values in each numeric column.
+    Any value more than 1.5x the IQR beyond the 25th/75th percentile is
+    flagged as a potential outlier.
+    """
+    outlier_summary = []
+    numeric_columns = df.select_dtypes(include=[np.number]).columns
+
+    for column in numeric_columns:
+        values = df[column].dropna()
+        if len(values) < 4:
+            # Not enough data points to meaningfully calculate quartiles.
+            continue
+
+        q1 = values.quantile(0.25)
+        q3 = values.quantile(0.75)
+        iqr = q3 - q1
+        lower_bound = q1 - 1.5 * iqr
+        upper_bound = q3 + 1.5 * iqr
+
+        outliers = values[(values < lower_bound) | (values > upper_bound)]
+
+        if len(outliers) > 0:
+            outlier_summary.append({
+                "Column": column,
+                "Outlier Count": len(outliers),
+                "Outlier %": round(len(outliers) / len(values) * 100, 2),
+                "Normal Range": f"{lower_bound:.2f} to {upper_bound:.2f}",
+            })
+
+    return pd.DataFrame(outlier_summary)
+
+
+def calculate_quality_score(df, total_missing, percent_missing, duplicate_count,
+                             percent_duplicate, inconsistent_df, outlier_df):
+    """
+    Combines every check above into a single 0-100 quality score.
+    Starts at 100 and subtracts penalty points for each issue found,
+    weighted by how severe/widespread that issue is. This is a
+    reasonable, transparent scoring approach - not the only valid one,
+    but it's easy to explain and adjust later.
+    """
+    score = 100.0
+
+    # Missing values: penalize proportionally, capped so a single
+    # issue can't zero out the whole score by itself.
+    score -= min(percent_missing * 0.5, 30)
+
+    # Duplicate rows: similarly capped.
+    score -= min(percent_duplicate * 0.5, 20)
+
+    # Inconsistent types: fixed penalty per affected column.
+    score -= min(len(inconsistent_df) * 5, 20)
+
+    # Outliers: small penalty per affected column, since some
+    # outliers are expected/legitimate in real data.
+    score -= min(len(outlier_df) * 3, 15)
+
+    return max(round(score), 0)
+
+
+def display_quality_score(score):
+    """Shows the overall score with a color-coded label."""
+    if score >= 90:
+        label, color = "Excellent", "green"
+    elif score >= 75:
+        label, color = "Good", "blue"
+    elif score >= 50:
+        label, color = "Needs Attention", "orange"
+    else:
+        label, color = "Poor", "red"
+
+    st.markdown(f"## Overall Data Quality Score: {score}/100")
+    st.markdown(f":{color}[**{label}**]")
+    st.progress(score / 100)
+
+
+def run_data_quality_report_page():
+    st.title("Data Quality Report")
+    st.caption("Part 2: Automated data quality checks")
+
+    # Reuse the dataset uploaded on the Data Upload page, if any.
+    df = st.session_state.get("uploaded_df")
+    filename = st.session_state.get("uploaded_filename", "your dataset")
+
+    if df is None:
+        st.warning(
+            "No dataset found. Please upload a file on the **Data Upload** "
+            "page first, then come back here."
+        )
+        return
+
+    st.info(f"Analyzing: **{filename}** ({df.shape[0]:,} rows, {df.shape[1]:,} columns)")
+
+    # Run every check.
+    missing_breakdown, total_missing, percent_missing = check_missing_values(df)
+    duplicate_count, percent_duplicate, duplicate_preview = check_duplicate_rows(df)
+    inconsistent_df = check_inconsistent_types(df)
+    outlier_df = check_outliers(df)
+
+    # Combine into one overall score.
+    score = calculate_quality_score(
+        df, total_missing, percent_missing, duplicate_count,
+        percent_duplicate, inconsistent_df, outlier_df
+    )
+
+    display_quality_score(score)
+
+    st.divider()
+
+    # ------------------------------------------------------------------
+    # Missing values section
+    # ------------------------------------------------------------------
+    st.subheader("🔍 Missing Values")
+    if total_missing > 0:
+        st.write(
+            f"Found **{total_missing:,}** missing value(s) "
+            f"({percent_missing:.1f}% of all cells)."
+        )
+        st.dataframe(missing_breakdown, use_container_width=True, hide_index=True)
+    else:
+        st.success("No missing values detected.")
+
+    st.divider()
+
+    # ------------------------------------------------------------------
+    # Duplicate rows section
+    # ------------------------------------------------------------------
+    st.subheader("🔁 Duplicate Rows")
+    if duplicate_count > 0:
+        st.write(
+            f"Found **{duplicate_count:,}** duplicate row(s) "
+            f"({percent_duplicate:.1f}% of the dataset)."
+        )
+        st.caption("Preview of duplicated rows (showing up to 20):")
+        st.dataframe(duplicate_preview, use_container_width=True)
+    else:
+        st.success("No duplicate rows detected.")
+
+    st.divider()
+
+    # ------------------------------------------------------------------
+    # Inconsistent data types section
+    # ------------------------------------------------------------------
+    st.subheader("⚠️ Inconsistent Data Types")
+    if not inconsistent_df.empty:
+        st.write(
+            f"Found **{len(inconsistent_df)}** column(s) with mixed "
+            "data types (e.g., numbers and text mixed together)."
+        )
+        st.dataframe(inconsistent_df, use_container_width=True, hide_index=True)
+    else:
+        st.success("No inconsistent data types detected.")
+
+    st.divider()
+
+    # ------------------------------------------------------------------
+    # Outliers section
+    # ------------------------------------------------------------------
+    st.subheader("📈 Outliers")
+    if not outlier_df.empty:
+        st.write(
+            f"Found potential outliers in **{len(outlier_df)}** numeric "
+            "column(s), based on the IQR method (values far outside the "
+            "typical range for that column)."
+        )
+        st.dataframe(outlier_df, use_container_width=True, hide_index=True)
+    else:
+        st.success("No significant outliers detected in numeric columns.")
 
 
 # ==================================================================
@@ -360,5 +617,7 @@ def run_image_sorting_page():
 # ==================================================================
 if page == "Data Upload":
     run_data_upload_page()
+elif page == "Data Quality Report":
+    run_data_quality_report_page()
 elif page == "Image Sorting by Category":
     run_image_sorting_page()
