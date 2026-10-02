@@ -11,14 +11,12 @@ RStudio. RStudio should run this file with a configured Python environment
 """
 
 # ================= PART 1: DATA UPLOAD =================
-"""
-Data Quality & Analytics Platform
-Part 1: Data Upload (merged implementation)
-This file contains ONLY the Data Upload module. The Data Quality Report (#2),
-Charts / Analytics (#3) and later modules are intentionally not built here.
-They will read the uploaded dataset through get_uploaded_dataset(), defined
-in the DATA HAND-OFF section below.
-"""
+# data_upload.py
+# Part 1: Data Upload (merged implementation)
+# This file contains ONLY the Data Upload module. The Data Quality Report (#2),
+# Charts / Analytics (#3) and later modules are intentionally not built here.
+# They will read the uploaded dataset through get_uploaded_dataset(), defined
+# in the DATA HAND-OFF section below.
 # ==========================================
 # IMPORTS
 # ==========================================
@@ -108,6 +106,32 @@ def get_uploaded_dataset():
 # so later modules never analyse stale or invalid data.
 def clear_uploaded_dataset():
     st.session_state.pop(SESSION_KEY, None)
+
+# ==========================================
+# MULTI-FILE STORAGE
+# Alongside the single "current dataset" above (kept for backward
+# compatibility), this dict holds EVERY successfully uploaded dataset
+# this session, keyed by file name, so the Data Quality Report page
+# can show a full report for each uploaded file - not just the most
+# recent one.
+# ==========================================
+MULTI_SESSION_KEY = "uploaded_datasets_all"
+
+
+def get_all_uploaded_datasets():
+    """Returns {filename: UploadedDataset} for every file uploaded this session."""
+    return st.session_state.get(MULTI_SESSION_KEY, {})
+
+
+def store_uploaded_dataset_multi(dataset):
+    """Adds/updates one dataset in the multi-file store, keyed by its name."""
+    all_datasets = st.session_state.get(MULTI_SESSION_KEY, {})
+    all_datasets[dataset.name] = dataset
+    st.session_state[MULTI_SESSION_KEY] = all_datasets
+
+
+def clear_all_uploaded_datasets():
+    st.session_state.pop(MULTI_SESSION_KEY, None)
 # ==========================================
 # FILE VALIDATION
 # ==========================================
@@ -431,26 +455,24 @@ def display_basic_summary(df):
 # file from another module will not launch the interface.
 
 # ============== PART 2: DATA QUALITY REPORT ==============
-"""
-data_quality_report.py
-Part 2 of the Data Quality & Analytics Platform: the Data Quality Report.
-This module is READ-ONLY. It never deletes rows, deletes columns, corrects
-values, or overwrites the DataFrame produced by Part 1 (Data Upload). Every
-check works on a private, cleaned-up view of the data that is created inside
-prepare_dataframe() and thrown away after the report is built.
-The module has two layers:
-1. ANALYSIS LAYER (pure Python + pandas + numpy, no Streamlit calls).
-   Functions such as calculate_missing_values(), detect_outliers() and
-   calculate_quality_score(). Because they do not touch Streamlit they are
-   easy to test.
-2. DISPLAY LAYER (Streamlit).
-   Functions named display_*() that turn analysis results into headings,
-   metrics, tables and messages. display_quality_report() is the single
-   entry point that app.py calls.
-Expected workflow:
-    Data Upload (Part 1) -> uploaded DataFrame -> run_quality_analysis()
-                         -> display_quality_report()
-"""
+# data_quality_report.py
+# Part 2 of the Data Quality & Analytics Platform: the Data Quality Report.
+# This module is READ-ONLY. It never deletes rows, deletes columns, corrects
+# values, or overwrites the DataFrame produced by Part 1 (Data Upload). Every
+# check works on a private, cleaned-up view of the data that is created inside
+# prepare_dataframe() and thrown away after the report is built.
+# The module has two layers:
+# 1. ANALYSIS LAYER (pure Python + pandas + numpy, no Streamlit calls).
+#    Functions such as calculate_missing_values(), detect_outliers() and
+#    calculate_quality_score(). Because they do not touch Streamlit they are
+#    easy to test.
+# 2. DISPLAY LAYER (Streamlit).
+#    Functions named display_*() that turn analysis results into headings,
+#    metrics, tables and messages. display_quality_report() is the single
+#    entry point that app.py calls.
+# Expected workflow:
+#     Data Upload (Part 1) -> uploaded DataFrame -> run_quality_analysis()
+#                          -> display_quality_report()
 import datetime as dt
 import logging
 import re
@@ -1703,8 +1725,14 @@ def display_issues(results):
     st.caption("Severity is an indicator based on thresholds used by this application. Findings describe patterns detected "
                "in the data; please review them in the context of your dataset.")
     # The multiselect labelled "Show severities" lets the user choose which severities appear in the table below.
+    # The key includes the dataset name so this widget has a unique
+    # identity per file - without this, showing a report for a second
+    # uploaded file crashes with a "duplicate element key" error, since
+    # this function is now called once per uploaded file.
+    dataset_name = results["overview"]["dataset_name"]
+    filter_key = f"dq_severity_filter_{dataset_name}"
     selected = st.multiselect("Show severities", ["High", "Medium", "Low"], default=["High", "Medium", "Low"],
-                              key="dq_severity_filter")
+                              key=filter_key)
     filtered = issues[issues["Severity"].isin(selected)]
     # The table lists Severity, Column, Issue and Details for every issue that matches the filter.
     st.dataframe(filtered, hide_index=True)
@@ -1837,6 +1865,36 @@ def display_recommendations(results):
     st.markdown("\n".join(f"{number}. {text}" for number, text in enumerate(results["recommendations"], start=1)))
     # This caption confirms the report is read-only: it never edits the user's data.
     st.caption("This report is read-only. Your uploaded dataset has not been modified. Apply any fixes to a copy of the data.")
+def get_validated_results(df, dataset_name):
+    """
+    Shared entry logic for every page that needs the quality-analysis
+    results dict: validates the dataframe, shows the right error/warning
+    if it can't be used, and otherwise returns the cached results from
+    get_or_compute_results(). Used by the Quality Report, Recommendations,
+    and Export pages so none of them re-implement this validation.
+
+    Returns the results dict on success, or None after already showing
+    the appropriate message to the user (the caller should just return).
+    """
+    level, message = check_dataframe(df)
+    if level == "error":
+        st.error(message)
+        return None
+    if level == "warning":
+        st.warning(message)
+        if isinstance(df, pd.DataFrame) and df.shape[1] > 0:
+            st.caption("Columns found: " + ", ".join(map(str, df.columns)))
+        return None
+    try:
+        with st.spinner("Analyzing dataset quality..."):
+            return get_or_compute_results(df, dataset_name)
+    except Exception:
+        logger.exception("Data quality analysis failed")
+        st.error("The data quality analysis could not be completed for this dataset. "
+                 "Please check that the file was read correctly and try again.")
+        return None
+
+
 def display_quality_report(df, dataset_name="Uploaded dataset"):
     """
     Entry point for Part 2. app.py calls this with the DataFrame from Part 1.
@@ -1846,28 +1904,8 @@ def display_quality_report(df, dataset_name="Uploaded dataset"):
     # The heading "Data Quality Report" is the main title of this page, so the
     # user immediately knows which module they are viewing.
     st.header("Data Quality Report")
-    # Validate the input first. Depending on the problem, the message below is shown as an
-    # error (red) or warning (yellow) box, and the report stops there.
-    level, message = check_dataframe(df)
-    if level == "error":
-        st.error(message)          # red box: the data cannot be used at all (e.g. no columns)
-        return
-    if level == "warning":
-        st.warning(message)        # yellow box: e.g. no dataset uploaded yet, or no rows
-        if isinstance(df, pd.DataFrame) and df.shape[1] > 0:
-            # A short line lists the columns so the user can see what was uploaded.
-            st.caption("Columns found: " + ", ".join(map(str, df.columns)))
-        return
-    # A spinner with the text "Analyzing dataset quality..." is visible while the checks run.
-    try:
-        with st.spinner("Analyzing dataset quality..."):
-            results = get_or_compute_results(df, dataset_name)
-    except Exception:
-        # Full technical details go to the log, not to the user.
-        logger.exception("Data quality analysis failed")
-        # This red box appears if something unexpected stops the entire analysis.
-        st.error("The data quality analysis could not be completed for this dataset. "
-                 "Please check that the file was read correctly and try again.")
+    results = get_validated_results(df, dataset_name)
+    if results is None:
         return
     # This green message confirms that the analysis finished and the report below is ready.
     st.success("Data quality analysis completed.")
@@ -1896,31 +1934,25 @@ def display_quality_report(df, dataset_name="Uploaded dataset"):
     display_datetime_quality(results)
     st.divider()
     display_issues(results)
-    st.divider()
-    display_recommendations(results)
-    st.divider()
-    display_export_section(results)
 
 # ================ PART 3: ANALYTICS & CHARTS ================
-"""
-analytics.py
-Data Quality & Analytics Platform
-Part 3: Analytics & Charts Module
-This module is intentionally self-contained. It exposes a single public
-entry point, render_analytics(df), which the main app.py router calls
-after Part 1 (Data Upload) and Part 2 (Data Quality Report) have already
-produced and validated a Pandas DataFrame.
-Workflow this module expects:
-    Data Upload (Part 1)
-          |
-    Pandas DataFrame
-          |
-    Data Quality Report (Part 2)
-          |
-    Analytics & Charts (Part 3)   <-- this file
-This file does NOT create sample/fake data. It only analyzes whatever
-real DataFrame is handed to it by render_analytics(df).
-"""
+# analytics.py
+# Data Quality & Analytics Platform
+# Part 3: Analytics & Charts Module
+# This module is intentionally self-contained. It exposes a single public
+# entry point, render_analytics(df), which the main app.py router calls
+# after Part 1 (Data Upload) and Part 2 (Data Quality Report) have already
+# produced and validated a Pandas DataFrame.
+# Workflow this module expects:
+#     Data Upload (Part 1)
+#           |
+#     Pandas DataFrame
+#           |
+#     Data Quality Report (Part 2)
+#           |
+#     Analytics & Charts (Part 3)   <-- this file
+# This file does NOT create sample/fake data. It only analyzes whatever
+# real DataFrame is handed to it by render_analytics(df).
 # ---------------------------------------------------------
 # IMPORT REQUIRED LIBRARIES
 # ---------------------------------------------------------
@@ -2108,11 +2140,15 @@ def create_box_plot(df, column):
     # the standard chart for spotting extreme values.
     figure = px.box(df, y=column, title=f"Box Plot of {column}")
     return figure
-def render_numerical_analysis(df, numeric_columns):
+def render_numerical_analysis(df, numeric_columns, key_suffix=""):
     """
     Render the "Distribution Analysis" and "Box Plot Analysis" sections:
     a column selector plus a histogram and box plot for the chosen
     numerical column, used to inspect distribution shape and outliers.
+
+    key_suffix makes this section's widgets unique when the same
+    function is called more than once on one page (e.g., one call per
+    uploaded file, plus a combined view).
     """
     st.subheader("Numerical Analysis")
     if not numeric_columns:
@@ -2124,7 +2160,7 @@ def render_numerical_analysis(df, numeric_columns):
     selected_column = st.selectbox(
         "Select Numerical Column",
         numeric_columns,
-        key="numeric_analysis_column",
+        key=f"numeric_analysis_column{key_suffix}",
     )
     # Two side-by-side charts: distribution shape on the left, outlier
     # view on the right, both driven by the same selected column.
@@ -2163,11 +2199,14 @@ def create_bar_chart(category_counts, column, top_n):
     # as "12.3%" instead of a raw float.
     figure.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
     return figure
-def render_categorical_analysis(df, categorical_columns):
+def render_categorical_analysis(df, categorical_columns, key_suffix=""):
     """
     Render the "Categorical Analysis" section: category counts,
     percentages, and a bar chart of the top-N categories for a
     user-selected categorical column.
+
+    key_suffix makes this section's widgets unique when the same
+    function is called more than once on one page.
     """
     st.subheader("Categorical Analysis")
     if not categorical_columns:
@@ -2178,7 +2217,7 @@ def render_categorical_analysis(df, categorical_columns):
     selected_column = st.selectbox(
         "Select Categorical Column",
         categorical_columns,
-        key="categorical_analysis_column",
+        key=f"categorical_analysis_column{key_suffix}",
     )
     # "Number of Top Categories to Display" creates a slider so the
     # user can control how many bars appear in the chart, since some
@@ -2193,7 +2232,7 @@ def render_categorical_analysis(df, categorical_columns):
         min_value=1,
         max_value=max_top_n,
         value=min(10, max_top_n),
-        key="categorical_top_n",
+        key=f"categorical_top_n{key_suffix}",
     )
     # Compute counts and percentages for the top-N categories.
     value_counts = df[selected_column].value_counts(dropna=True).head(top_n)
@@ -2271,11 +2310,14 @@ def create_scatter_plot(df, x_column, y_column, group_column=None):
         title=f"{y_column} vs {x_column}",
     )
     return figure
-def render_scatter_analysis(df, numeric_columns, categorical_columns):
+def render_scatter_analysis(df, numeric_columns, categorical_columns, key_suffix=""):
     """
     Render the "Scatter Plot Analysis" section: X/Y axis selectors, an
     optional grouping column, and the resulting interactive scatter
     plot showing the relationship between two numerical variables.
+
+    key_suffix makes this section's widgets unique when the same
+    function is called more than once on one page.
     """
     st.subheader("Scatter Plot Analysis")
     # A scatter plot needs at least two numerical columns: one for each
@@ -2287,19 +2329,19 @@ def render_scatter_analysis(df, numeric_columns, categorical_columns):
     with axis_col1:
         # "Select X-Axis Column" creates the dropdown that sets which
         # numerical variable is plotted along the horizontal axis.
-        x_column = st.selectbox("Select X-Axis Column", numeric_columns, index=0, key="scatter_x")
+        x_column = st.selectbox("Select X-Axis Column", numeric_columns, index=0, key=f"scatter_x{key_suffix}")
     with axis_col2:
         # "Select Y-Axis Column" creates the dropdown for the vertical
         # axis; defaults to the second numeric column so X and Y are
         # not the same column by default.
         default_y_index = 1 if len(numeric_columns) > 1 else 0
-        y_column = st.selectbox("Select Y-Axis Column", numeric_columns, index=default_y_index, key="scatter_y")
+        y_column = st.selectbox("Select Y-Axis Column", numeric_columns, index=default_y_index, key=f"scatter_y{key_suffix}")
     with axis_col3:
         # "Group By (Optional)" lets the user color-code points by a
         # categorical column, e.g. to compare groups within the same
         # scatter plot. "None" means no grouping is applied.
         group_options = ["None"] + categorical_columns
-        group_selection = st.selectbox("Group By (Optional)", group_options, key="scatter_group")
+        group_selection = st.selectbox("Group By (Optional)", group_options, key=f"scatter_group{key_suffix}")
         group_column = None if group_selection == "None" else group_selection
     try:
         st.plotly_chart(
@@ -2357,11 +2399,14 @@ def create_time_series_chart(df, date_column, value_column, aggregation_label):
         markers=True,
     )
     return figure
-def render_time_series_analysis(df, datetime_columns, numeric_columns):
+def render_time_series_analysis(df, datetime_columns, numeric_columns, key_suffix=""):
     """
     Render the "Time-Series Analysis" section: datetime and numeric
     column selectors, an aggregation-level control, and the resulting
     line chart of the numeric value over time.
+
+    key_suffix makes this section's widgets unique when the same
+    function is called more than once on one page.
     """
     st.subheader("Time-Series Analysis")
     # Time-series analysis needs at least one datetime column and at
@@ -2376,11 +2421,11 @@ def render_time_series_analysis(df, datetime_columns, numeric_columns):
     with control_col1:
         # "Select Date Column" creates the dropdown that chooses which
         # detected datetime column defines the time axis.
-        date_column = st.selectbox("Select Date Column", datetime_columns, key="ts_date_column")
+        date_column = st.selectbox("Select Date Column", datetime_columns, key=f"ts_date_column{key_suffix}")
     with control_col2:
         # "Select Value Column" creates the dropdown that chooses which
         # numerical column is aggregated and plotted over time.
-        value_column = st.selectbox("Select Value Column", numeric_columns, key="ts_value_column")
+        value_column = st.selectbox("Select Value Column", numeric_columns, key=f"ts_value_column{key_suffix}")
     with control_col3:
         # "Aggregate By" creates the dropdown that controls the time
         # granularity (day/week/month/quarter/year) used to group and
@@ -2389,7 +2434,7 @@ def render_time_series_analysis(df, datetime_columns, numeric_columns):
             "Aggregate By",
             list(AGGREGATION_RULES.keys()),
             index=2,
-            key="ts_aggregation",
+            key=f"ts_aggregation{key_suffix}",
         )
     try:
         chart = create_time_series_chart(df, date_column, value_column, aggregation_label)
@@ -2401,7 +2446,7 @@ def render_time_series_analysis(df, datetime_columns, numeric_columns):
 # ---------------------------------------------------------
 # MAIN ENTRY POINT
 # ---------------------------------------------------------
-def render_analytics(df, dataset_name="Uploaded Dataset"):
+def render_analytics(df, dataset_name="Uploaded Dataset", key_suffix=""):
     """
     Public entry point for Part 3: Analytics & Charts.
     The main app.py router should call this function AFTER a real
@@ -2409,6 +2454,12 @@ def render_analytics(df, dataset_name="Uploaded Dataset"):
     Part 2 (Data Quality Report), passing that same DataFrame in as
     `df`. This function never generates or substitutes sample data; if
     `df` is missing or empty, it shows guidance instead of a chart.
+
+    key_suffix should be unique whenever render_analytics is called
+    more than once on the same page (e.g., once per uploaded file,
+    plus once for a "combined" view) - every widget inside uses it to
+    stay unique and avoid Streamlit's duplicate-key errors.
+
     Example integration from app.py:
         from analytics import render_analytics
         render_analytics(st.session_state["dataframe"], st.session_state["dataset_name"])
@@ -2446,15 +2497,15 @@ def render_analytics(df, dataset_name="Uploaded Dataset"):
     st.divider()
     render_descriptive_statistics(df, numeric_columns)
     st.divider()
-    render_numerical_analysis(df, numeric_columns)
+    render_numerical_analysis(df, numeric_columns, key_suffix=key_suffix)
     st.divider()
-    render_categorical_analysis(df, categorical_columns)
+    render_categorical_analysis(df, categorical_columns, key_suffix=key_suffix)
     st.divider()
     render_correlation_analysis(df, numeric_columns)
     st.divider()
-    render_scatter_analysis(df, numeric_columns, categorical_columns)
+    render_scatter_analysis(df, numeric_columns, categorical_columns, key_suffix=key_suffix)
     st.divider()
-    render_time_series_analysis(df, datetime_columns, numeric_columns)
+    render_time_series_analysis(df, datetime_columns, numeric_columns, key_suffix=key_suffix)
 # -----------------------------------------------------------------------
 # STANDALONE TEST MODE
 # -----------------------------------------------------------------------
@@ -2478,122 +2529,459 @@ def get_current_dataset():
 
 
 def run_data_upload_page():
-    """Render Part 1: Data Upload."""
+    """Render Part 1: Data Upload. Accepts one or more files at once."""
     st.header("Data Upload")
-    st.caption("Part 1: Upload and inspect your dataset.")
+    st.caption("Part 1: Upload and inspect your dataset(s).")
 
-    uploaded_file = st.file_uploader(
-        "Choose a file",
+    uploaded_files = st.file_uploader(
+        "Choose one or more files",
         type=SUPPORTED_EXTENSIONS,
         key="main_dataset_uploader",
+        accept_multiple_files=True,
     )
     st.caption(
         "Supported formats: " +
-        ", ".join(ext.upper() for ext in SUPPORTED_EXTENSIONS)
+        ", ".join(ext.upper() for ext in SUPPORTED_EXTENSIONS) +
+        ". Maximum file size: 1 GB per file."
     )
 
-    if uploaded_file is None:
-        # Clear stale data when the uploader is emptied.
-        clear_uploaded_dataset()
-        st.info("Upload a file to get started.")
+    # IMPORTANT: st.file_uploader's widget state only persists while
+    # this exact widget keeps being instantiated on every rerun. Since
+    # navigation here works by only rendering ONE page's code per
+    # rerun (not Streamlit's native multipage system), switching to
+    # another page and back makes this uploader remount empty - even
+    # though nothing was actually removed. Treating that as "the user
+    # cleared their files" would silently delete every previously
+    # uploaded dataset on a simple page switch, which is exactly the
+    # bug reported: data disappearing after visiting Analytics and
+    # coming back. So: an empty `uploaded_files` here does NOT clear
+    # anything - it only means "no NEW files were just selected."
+    # Previously uploaded datasets stay available via
+    # get_all_uploaded_datasets() regardless.
+    already_stored = get_all_uploaded_datasets()
+
+    if not uploaded_files and not already_stored:
+        st.info("Upload one or more files to get started.")
         return
 
-    try:
-        # getvalue() reads the upload without depending on a file-pointer position.
-        raw_bytes = uploaded_file.getvalue()
-        dataset = process_upload(uploaded_file.name, raw_bytes)
-    except UploadError as error:
-        clear_uploaded_dataset()
-        st.error(str(error))
-        return
-    except MemoryError:
-        clear_uploaded_dataset()
-        st.error("This file is too large to process on this computer.")
-        return
-    except Exception:
-        clear_uploaded_dataset()
-        logger.exception("Unexpected upload failure")
-        st.error(UNEXPECTED_ERROR_MESSAGE)
-        return
-
-    # A header-only dataset is valid for loading but not useful for analysis.
-    if dataset.dataframe.shape[0] == 0:
-        clear_uploaded_dataset()
-        st.warning("This dataset has no rows - only column headers were found.")
+    if not uploaded_files and already_stored:
+        # Nothing new was just selected, but files from earlier in
+        # this session are still available - show them instead of a
+        # blank page.
+        st.metric("Files Uploaded", len(already_stored))
+        if st.button("Clear all uploaded files"):
+            clear_uploaded_dataset()
+            clear_all_uploaded_datasets()
+            st.rerun()
+        st.divider()
+        for filename, dataset in already_stored.items():
+            with st.container(border=True):
+                st.success(f"'{filename}' is loaded.")
+                display_dataset_information(dataset)
+                if dataset.image is not None:
+                    display_image_preview(dataset.image)
+                with st.expander("View details", expanded=(len(already_stored) == 1)):
+                    display_dataset_preview(dataset.dataframe)
+                    display_column_information(dataset.dataframe)
+                    display_basic_summary(dataset.dataframe)
         return
 
-    # Avoid reparsing the same file on every Streamlit rerun.
-    current = get_current_dataset()
-    if current is None or (
-        current.name != dataset.name
-        or current.file_size_bytes != dataset.file_size_bytes
-    ):
-        store_uploaded_dataset(dataset)
-        # A new dataset must invalidate the Part 2 cache.
-        st.session_state.pop("dq_report_cache", None)
-        st.session_state.pop("dq_report_fingerprint", None)
+    # st.metric gives a clear, immediate count of how many files are
+    # currently loaded, which also tells the user how many full
+    # reports to expect on the Data Quality Report page.
+    st.metric("Files Uploaded", len(uploaded_files))
+    if st.button("Clear all uploaded files"):
+        clear_uploaded_dataset()
+        clear_all_uploaded_datasets()
+        st.rerun()
+    st.divider()
 
-    dataset = get_current_dataset()
+    successfully_loaded_count = 0
 
-    st.success(f"'{dataset.name}' was uploaded and read successfully.")
-    display_dataset_information(dataset)
+    for uploaded_file in uploaded_files:
+        with st.container(border=True):
+            try:
+                raw_bytes = uploaded_file.getvalue()
+                dataset = process_upload(uploaded_file.name, raw_bytes)
+            except UploadError as error:
+                st.error(f"**{uploaded_file.name}**: {error}")
+                continue
+            except MemoryError:
+                st.error(f"**{uploaded_file.name}**: This file is too large to process on this computer.")
+                continue
+            except Exception:
+                logger.exception("Unexpected upload failure for %s", uploaded_file.name)
+                st.error(f"**{uploaded_file.name}**: {UNEXPECTED_ERROR_MESSAGE}")
+                continue
 
-    if dataset.image is not None:
-        display_image_preview(dataset.image)
+            if dataset.dataframe.shape[0] == 0:
+                st.warning(f"**{uploaded_file.name}**: This dataset has no rows - only column headers were found.")
+                continue
 
-    display_dataset_preview(dataset.dataframe)
-    display_column_information(dataset.dataframe)
-    display_basic_summary(dataset.dataframe)
+            successfully_loaded_count += 1
+
+            # Keep this dataset in the multi-file store, so the Data
+            # Quality Report page can show a full report for every
+            # uploaded file, not just the most recent one.
+            existing = get_all_uploaded_datasets().get(dataset.name)
+            if existing is None or existing.file_size_bytes != dataset.file_size_bytes:
+                store_uploaded_dataset_multi(dataset)
+                # A changed file must invalidate any cached report for that name.
+                st.session_state.pop("dq_report_cache", None)
+                st.session_state.pop("dq_report_fingerprint", None)
+
+            # Also keep the existing single-dataset slot pointed at the
+            # most recently processed file, since Analytics & Charts
+            # (Part 3) still works on one dataset at a time.
+            store_uploaded_dataset(dataset)
+
+            st.success(f"'{dataset.name}' was uploaded and read successfully.")
+            display_dataset_information(dataset)
+
+            if dataset.image is not None:
+                display_image_preview(dataset.image)
+
+            with st.expander("View details", expanded=(len(uploaded_files) == 1)):
+                display_dataset_preview(dataset.dataframe)
+                display_column_information(dataset.dataframe)
+                display_basic_summary(dataset.dataframe)
+
+    if successfully_loaded_count > 1:
+        st.info(
+            f"{successfully_loaded_count} file(s) loaded successfully. "
+            "Go to **Data Quality Report** to see a full report for each one."
+        )
 
 
 def run_quality_report_page():
-    """Render Part 2: Data Quality Report using Part 1's DataFrame."""
-    dataset = get_current_dataset()
+    """
+    Render Part 2: Data Quality Report. Shows a full, independent
+    report for EVERY file uploaded in Part 1 - not just the most
+    recent one - each in its own collapsible section.
+    """
+    all_datasets = get_all_uploaded_datasets()
 
-    if dataset is None:
+    if not all_datasets:
         st.header("Data Quality Report")
-        st.info("Upload a dataset in Part 1 before opening the Data Quality Report.")
+        st.info("Upload one or more files in Data Upload before opening the Data Quality Report.")
         return
 
-    display_quality_report(dataset.dataframe, dataset.name)
+    st.header("Data Quality Report")
+    st.caption(f"Showing a full report for {len(all_datasets)} uploaded file(s).")
+
+    for filename, dataset in all_datasets.items():
+        with st.expander(f"📄 {filename}", expanded=(len(all_datasets) == 1)):
+            display_quality_report(dataset.dataframe, dataset.name)
+
+
+def run_recommendations_page():
+    """
+    Standalone Recommendations page. Reuses the same cached quality
+    results as the Data Quality Report page (get_validated_results ->
+    get_or_compute_results), so recommendations are instant for a file
+    whose report has already been viewed, and still works on its own
+    otherwise. Shows one set of recommendations per uploaded file.
+    """
+    all_datasets = get_all_uploaded_datasets()
+
+    if not all_datasets:
+        st.header("Recommendations")
+        st.info("Upload one or more files in Data Upload before viewing recommendations.")
+        return
+
+    st.header("Recommendations")
+    st.caption(f"Plain-English suggestions for {len(all_datasets)} uploaded file(s), based on their quality checks.")
+
+    for filename, dataset in all_datasets.items():
+        with st.expander(f"📄 {filename}", expanded=(len(all_datasets) == 1)):
+            results = get_validated_results(dataset.dataframe, dataset.name)
+            if results is None:
+                continue
+            display_recommendations(results)
+
+
+def run_export_page():
+    """
+    Standalone Export Report page. Reuses the same cached quality
+    results as the other two pages, so the PDF/CSV export always
+    reflects whatever the Data Quality Report and Recommendations
+    pages are currently showing for that file.
+    """
+    all_datasets = get_all_uploaded_datasets()
+
+    if not all_datasets:
+        st.header("Export Report")
+        st.info("Upload one or more files in Data Upload before exporting a report.")
+        return
+
+    st.header("Export Report")
+    st.caption(f"Download the quality findings for {len(all_datasets)} uploaded file(s).")
+
+    for filename, dataset in all_datasets.items():
+        with st.expander(f"📄 {filename}", expanded=(len(all_datasets) == 1)):
+            results = get_validated_results(dataset.dataframe, dataset.name)
+            if results is None:
+                continue
+            display_export_section(results)
+
+
+def build_combined_dataframe(all_datasets):
+    """
+    Concatenates every uploaded dataset into one combined DataFrame for
+    cross-file analysis. Columns that don't exist in every file become
+    NaN for the files missing them (pd.concat's default outer-join
+    behavior on columns) - this is a reasonable default since files
+    uploaded together often share a similar but not identical schema.
+    A "Source File" column is added so the combined view can still be
+    traced back to where each row came from.
+    """
+    pieces = []
+    for filename, dataset in all_datasets.items():
+        piece = dataset.dataframe.copy()
+        piece.insert(0, "Source File", filename)
+        pieces.append(piece)
+    return pd.concat(pieces, ignore_index=True, sort=False)
 
 
 def run_analytics_page():
-    """Render Part 3: Analytics & Charts using Part 1's DataFrame."""
-    dataset = get_current_dataset()
+    """
+    Render Part 3: Analytics & Charts. When more than one file has
+    been uploaded, lets the user pick ONE file to analyze on its own,
+    or an "All Files Combined" view that concatenates every uploaded
+    dataset together for cross-file analysis.
+    """
+    st.header("Analytics & Charts")
 
-    if dataset is None:
-        st.header("Analytics & Charts")
-        st.info("Upload a dataset in Part 1 before opening Analytics & Charts.")
+    all_datasets = get_all_uploaded_datasets()
+
+    if not all_datasets:
+        st.info("Upload one or more files in Data Upload before opening Analytics & Charts.")
         return
 
-    render_analytics(dataset.dataframe, dataset.name)
+    if len(all_datasets) == 1:
+        # Only one file uploaded - no need to show a selector at all.
+        filename, dataset = next(iter(all_datasets.items()))
+        render_analytics(dataset.dataframe, dataset.name, key_suffix=f"_{filename}")
+        return
+
+    # Multiple files uploaded: let the user choose which view they want.
+    view_options = list(all_datasets.keys()) + ["All Files Combined"]
+    selected_view = st.radio(
+        "View analytics for:",
+        view_options,
+        key="analytics_view_selector",
+        horizontal=True,
+    )
+
+    st.divider()
+
+    if selected_view == "All Files Combined":
+        st.caption(
+            f"Showing combined analytics across all {len(all_datasets)} uploaded files. "
+            "Columns that don't appear in every file will show missing values for the "
+            "files that lack them. Each row is tagged with its source file."
+        )
+        combined_df = build_combined_dataframe(all_datasets)
+        render_analytics(combined_df, "All Files Combined", key_suffix="_combined")
+    else:
+        dataset = all_datasets[selected_view]
+        render_analytics(dataset.dataframe, dataset.name, key_suffix=f"_{selected_view}")
+
+
+# Each feature gets its own accent color and icon, used consistently
+# in the sidebar nav button and the page title - this is what makes
+# the three features feel visually distinct rather than uniform.
+FEATURE_ACCENTS = {
+    "1. Data Upload": {"color": "#2DD4BF", "icon": "📤", "short": "Data Upload"},
+    "2. Data Quality Report": {"color": "#F5A524", "icon": "✅", "short": "Data Quality Report"},
+    "3. Analytics & Charts": {"color": "#818CF8", "icon": "📊", "short": "Analytics & Charts"},
+    "4. Recommendations": {"color": "#34D399", "icon": "💡", "short": "Recommendations"},
+    "5. Export Report": {"color": "#F472B6", "icon": "⬇️", "short": "Export Report"},
+}
+
+
+def render_landing_page():
+    """
+    Clarifile's landing page: a black screen shown once per session,
+    before the actual app. Gated by st.session_state["entered_app"] -
+    everything in main() after this function returns False stays
+    hidden until the button here is clicked.
+    """
+    st.markdown(
+        """
+        <style>
+        [data-testid="stAppViewContainer"], [data-testid="stHeader"], body {
+            background-color: #000000 !important;
+        }
+        section[data-testid="stSidebar"] {
+            display: none;
+        }
+        .landing-title {
+            text-align: center;
+            font-size: 3.2rem;
+            font-weight: 800;
+            color: #FFFFFF;
+            margin-top: 14vh;
+            margin-bottom: 0.5rem;
+            letter-spacing: -0.02em;
+        }
+        .landing-subtitle {
+            text-align: center;
+            font-size: 1.15rem;
+            color: #9CA3AF;
+            margin-bottom: 3rem;
+        }
+        div[data-testid="stButton"] {
+            display: flex;
+            justify-content: center;
+        }
+        div[data-testid="stButton"] button {
+            background: linear-gradient(135deg, #2DD4BF, #818CF8);
+            color: #000000;
+            font-weight: 700;
+            font-size: 1.1rem;
+            padding: 0.9rem 2.8rem;
+            border-radius: 999px;
+            border: none;
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+        }
+        div[data-testid="stButton"] button:hover {
+            transform: scale(1.04);
+            box-shadow: 0 0 24px rgba(45, 212, 191, 0.45);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="landing-title">Welcome to Clarifile</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="landing-subtitle">Upload any file. Get clarity on what\'s inside.</div>',
+        unsafe_allow_html=True,
+    )
+
+    _, center_col, _ = st.columns([1, 1, 1])
+    with center_col:
+        if st.button("Enter Platform →", key="enter_platform_button", use_container_width=True):
+            st.session_state["entered_app"] = True
+            st.rerun()
+
+
+def render_sidebar_nav():
+    """
+    Icon-based sidebar navigation. Streamlit's st.radio can't be
+    restyled into individual colored buttons, so this uses real
+    st.button widgets instead - one per feature - with the active
+    one highlighted.
+
+    Streamlit's type="primary" uses the theme's default primary color
+    (red) for every primary button regardless of custom styling, which
+    is why the active button previously showed red instead of each
+    feature's intended accent color. The CSS below overrides that by
+    targeting each button's fixed position in the sidebar (1st = Data
+    Upload/teal, 2nd = Data Quality Report/amber, 3rd = Analytics &
+    Charts/indigo), since these three buttons are always rendered in
+    this same order.
+    """
+    # Dark text color pairs well with each light-ish accent background
+    # for the active (filled) state; kept as one dict so adding a 6th
+    # feature later only means adding one more entry here.
+    accent_list = list(FEATURE_ACCENTS.values())
+    dark_text_for = ["#00261F", "#2E1900", "#1A1A3D", "#063B2C", "#4A0E2E"]
+
+    css_rules = []
+    for index, style in enumerate(accent_list, start=1):
+        color = style["color"]
+        text_color = dark_text_for[(index - 1) % len(dark_text_for)]
+        css_rules.append(f"""
+        section[data-testid="stSidebar"] div[data-testid="stButton"]:nth-of-type({index}) button:hover {{
+            transform: translateX(3px); border-color: {color}; box-shadow: 0 4px 14px {color}40;
+        }}
+        section[data-testid="stSidebar"] div[data-testid="stButton"]:nth-of-type({index}) button[kind="primary"] {{
+            background: {color} !important; border-color: {color} !important; color: {text_color} !important; font-weight: 700;
+        }}
+        """)
+
+    st.markdown(
+        f"""
+        <style>
+        section[data-testid="stSidebar"] div[data-testid="stButton"] button {{
+            width: 100%;
+            text-align: left;
+            border-radius: 10px;
+            border: 1px solid rgba(255,255,255,0.08);
+            padding: 0.7rem 1rem;
+            margin-bottom: 0.45rem;
+            font-size: 0.95rem;
+            font-weight: 500;
+            transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease, background 180ms ease;
+        }}
+        section[data-testid="stSidebar"] div[data-testid="stButton"] button:active {{
+            transform: scale(0.97) translateX(0);
+        }}
+        {"".join(css_rules)}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if "current_page" not in st.session_state:
+        st.session_state["current_page"] = "1. Data Upload"
+
+    st.sidebar.markdown("### Choose a feature")
+
+    for page_key, style in FEATURE_ACCENTS.items():
+        is_active = st.session_state["current_page"] == page_key
+        button_label = f"{style['icon']}  {style['short']}"
+
+        if st.sidebar.button(
+            button_label,
+            key=f"nav_{page_key}",
+            type="primary" if is_active else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state["current_page"] = page_key
+            st.rerun()
+
+    return st.session_state["current_page"]
 
 
 def main():
-    """Start the three-part Streamlit application."""
+    """Start the three-part Streamlit application, behind Clarifile's landing page."""
     st.set_page_config(
-        page_title=APP_TITLE,
+        page_title="Clarifile - Upload, Check, Understand Any File",
         page_icon="📊",
         layout="wide",
         initial_sidebar_state="expanded",
     )
 
-    st.title(APP_TITLE)
-    st.caption("Data Upload → Data Quality Report → Analytics & Charts")
+    if "entered_app" not in st.session_state:
+        st.session_state["entered_app"] = False
 
-    page = st.sidebar.radio(
-        "Navigation",
-        ["1. Data Upload", "2. Data Quality Report", "3. Analytics & Charts"],
-        key="main_navigation",
+    if not st.session_state["entered_app"]:
+        render_landing_page()
+        st.stop()
+
+    page = render_sidebar_nav()
+    accent = FEATURE_ACCENTS[page]["color"]
+
+    # A slim colored accent bar rather than a duplicate title - each
+    # page function below already renders its own st.header().
+    st.markdown(
+        f"<div style='height:4px; background:{accent}; border-radius:2px; margin-bottom:1rem;'></div>",
+        unsafe_allow_html=True,
     )
 
     if page == "1. Data Upload":
         run_data_upload_page()
     elif page == "2. Data Quality Report":
         run_quality_report_page()
-    else:
+    elif page == "3. Analytics & Charts":
         run_analytics_page()
+    elif page == "4. Recommendations":
+        run_recommendations_page()
+    else:
+        run_export_page()
 
 
 if __name__ == "__main__":
