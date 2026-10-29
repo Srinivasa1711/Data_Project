@@ -2674,55 +2674,144 @@ def run_quality_report_page():
             display_quality_report(dataset.dataframe, dataset.name)
 
 
-def run_recommendations_page():
-    """
-    Standalone Recommendations page. Reuses the same cached quality
-    results as the Data Quality Report page (get_validated_results ->
-    get_or_compute_results), so recommendations are instant for a file
-    whose report has already been viewed, and still works on its own
-    otherwise. Shows one set of recommendations per uploaded file.
-    """
-    all_datasets = get_all_uploaded_datasets()
+# =============================================================================
+# PARTS 4 AND 5: RECOMMENDATIONS ENGINE + EXPORTABLE REPORT (Kedar's modules)
+# =============================================================================
+# These two pages use recommendations_engine.py (Part 4) and exportable_report.py
+# + report_builder.py (Part 5). They live in separate files in the same folder
+# as this script. Their widgets use fixed keys, so each page shows ONE uploaded
+# file at a time, chosen with the "Choose a file" selector.
 
+def _quality_results_for_modules(results):
+    """
+    Translate this app's Part 2 results into the small dictionary that Parts 4
+    and 5 accept: the overall score, the list of findings, and the invalid
+    values (column / issue / count) found by the Data Quality Report.
+    """
+    quality = {}
+    score = results.get("score")
+    if isinstance(score, dict) and "overall" in score:
+        quality["Quality Score"] = f"{score['overall']:.0f}/100 ({score.get('rating', '')})".replace(" ()", "")
+    issues = results.get("issues")
+    findings, invalid = [], []
+    if isinstance(issues, pd.DataFrame) and not issues.empty:
+        for _, row in issues.iterrows():
+            findings.append(f"[{row['Severity']}] {row['Column']} - {row['Issue']}: {row['Details']}")
+            if str(row["Issue"]) == "Invalid Values":
+                match = re.match(r"\s*([\d,]+)", str(row["Details"]))
+                if match:
+                    invalid.append({"column": str(row["Column"]),
+                                    "issue": "Reported by the Data Quality Report",
+                                    "count": int(match.group(1).replace(",", ""))})
+    if len(findings) > 40:
+        findings = findings[:40] + [f"...and {len(findings) - 40} more finding(s) in the Data Quality Report."]
+    quality["findings"] = findings
+    quality["invalid_values"] = invalid
+    return quality
+
+
+def _analytics_results_for_modules(df):
+    """
+    The Pearson correlation matrix of the numeric columns (the same statistic
+    the Analytics & Charts page shows), in the format Parts 4 and 5 expect.
+    Columns with too little data or no variation are left out.
+    """
+    from platform_helpers import detect_numeric_columns
+    usable = [c for c in detect_numeric_columns(df)
+              if df[c].notna().sum() >= 8 and df[c].nunique(dropna=True) > 1]
+    if len(usable) < 2:
+        return {}
+    return {"correlation_matrix": df[usable].replace([np.inf, -np.inf], np.nan).corr()}
+
+
+def _choose_dataset(page_key):
+    """Show a file picker (when 2+ files are uploaded) and return (name, dataset), or (None, None)."""
+    all_datasets = get_all_uploaded_datasets()
     if not all_datasets:
+        return None, None
+    names = list(all_datasets.keys())
+    if len(names) == 1:
+        chosen = names[0]
+    else:
+        st.caption(f"{len(names)} files are uploaded. Choose which one to work with.")
+        chosen = st.selectbox("Choose a file", names, key=f"{page_key}_file_choice")
+    return chosen, all_datasets[chosen]
+
+
+def _reset_widget_state_when_file_changes(page_key, chosen, widget_keys):
+    """
+    Forget the old widget selections when the user switches to another file, so
+    filters chosen for file A (for example a category that only exists in A)
+    never leak into file B.
+    """
+    marker = f"{page_key}_last_file"
+    if st.session_state.get(marker) != chosen:
+        for key in widget_keys:
+            st.session_state.pop(key, None)
+        st.session_state[marker] = chosen
+
+
+def _cached_part4_table(part4, dataset, quality_results, analytics_results):
+    """Generate the Part 4 recommendation table once per file/content and reuse it on reruns."""
+    fingerprint = (dataset.name, dataframe_fingerprint(dataset.dataframe))
+    cache = st.session_state.setdefault("part4_table_cache", {})
+    hit = cache.get(dataset.name)
+    if hit and hit["fingerprint"] == fingerprint:
+        return hit["table"]
+    table = part4.generate_recommendations(dataset.dataframe, quality_results, analytics_results)
+    cache[dataset.name] = {"fingerprint": fingerprint, "table": table}
+    return table
+
+
+def run_recommendations_page():
+    """Part 4: Recommendations (Kedar's recommendations_engine.py) for the chosen file."""
+    try:
+        import recommendations_engine as part4
+    except ImportError as error:
+        st.error(f"Part 4 could not be loaded: {error}")
+        st.info("Make sure recommendations_engine.py and platform_helpers.py are in the same "
+                "folder as this script, then restart the app.")
+        return
+
+    chosen, dataset = _choose_dataset("part4")
+    if dataset is None:
         st.header("Recommendations")
         st.info("Upload one or more files in Data Upload before viewing recommendations.")
         return
 
-    st.header("Recommendations")
-    st.caption(f"Plain-English suggestions for {len(all_datasets)} uploaded file(s), based on their quality checks.")
+    _reset_widget_state_when_file_changes(
+        "part4", chosen,
+        [f"{part4.KEY}_priority", f"{part4.KEY}_category", f"{part4.KEY}_show_rule"])
 
-    for filename, dataset in all_datasets.items():
-        with st.expander(f"📄 {filename}", expanded=(len(all_datasets) == 1)):
-            results = get_validated_results(dataset.dataframe, dataset.name)
-            if results is None:
-                continue
-            display_recommendations(results)
+    results = get_validated_results(dataset.dataframe, dataset.name)
+    quality_results = _quality_results_for_modules(results) if results is not None else None
+    analytics_results = _analytics_results_for_modules(dataset.dataframe)
+    part4.render_recommendations(dataset.dataframe, quality_results, analytics_results)
 
 
 def run_export_page():
-    """
-    Standalone Export Report page. Reuses the same cached quality
-    results as the other two pages, so the PDF/CSV export always
-    reflects whatever the Data Quality Report and Recommendations
-    pages are currently showing for that file.
-    """
-    all_datasets = get_all_uploaded_datasets()
+    """Part 5: Exportable Report (Kedar's exportable_report.py + report_builder.py) for the chosen file."""
+    try:
+        import exportable_report as part5
+        import recommendations_engine as part4
+    except ImportError as error:
+        st.error(f"Part 5 could not be loaded: {error}")
+        st.info("Make sure report_builder.py, exportable_report.py, recommendations_engine.py and "
+                "platform_helpers.py are in the same folder as this script, and that the packages in "
+                "requirements.txt are installed (pip install -r requirements.txt), then restart the app.")
+        return
 
-    if not all_datasets:
-        st.header("Export Report")
+    chosen, dataset = _choose_dataset("part5")
+    if dataset is None:
+        st.header("Exportable Report")
         st.info("Upload one or more files in Data Upload before exporting a report.")
         return
 
-    st.header("Export Report")
-    st.caption(f"Download the quality findings for {len(all_datasets)} uploaded file(s).")
-
-    for filename, dataset in all_datasets.items():
-        with st.expander(f"📄 {filename}", expanded=(len(all_datasets) == 1)):
-            results = get_validated_results(dataset.dataframe, dataset.name)
-            if results is None:
-                continue
-            display_export_section(results)
+    results = get_validated_results(dataset.dataframe, dataset.name)
+    quality_results = _quality_results_for_modules(results) if results is not None else None
+    analytics_results = _analytics_results_for_modules(dataset.dataframe)
+    recommendations = _cached_part4_table(part4, dataset, quality_results, analytics_results)
+    part5.render_exportable_report(dataset.dataframe, quality_results, analytics_results, recommendations)
 
 
 def build_combined_dataframe(all_datasets):

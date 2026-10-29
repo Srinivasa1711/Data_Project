@@ -1,24 +1,9 @@
 @echo off
-REM ------------------------------------------------------------------
-REM Double-click this file to launch the Data Quality & Analytics app.
-REM It automatically:
-REM   1. Goes into this file's own folder (wherever you put it)
-REM   2. Installs every required package
-REM   3. Runs the app, which opens your browser automatically
-REM
-REM NOTE: If Image Sorting shows a TensorFlow DLL error, that is a
-REM Windows system issue, not something this script can fix. Install
-REM the Microsoft Visual C++ Redistributable from:
-REM https://aka.ms/vs/17/release/vc_redist.x64.exe
-REM then restart your computer. Data Upload will work either way.
-REM ------------------------------------------------------------------
-
+REM Double-click to install what is needed and start Clarifile.
+REM If you use a virtual environment (venv311), activate it first in a terminal instead.
 cd /d "%~dp0"
-
 echo Checking required packages...
-pip install streamlit pandas openpyxl Pillow pypdf tensorflow numpy --quiet
-
-echo Starting the app... your browser will open automatically.
-streamlit run main_app.py
-
+python -m pip install -r requirements.txt --quiet
+echo Starting Clarifile... your browser will open automatically.
+python -m streamlit run Data-Software-Merged1.2.3.py
 pause
